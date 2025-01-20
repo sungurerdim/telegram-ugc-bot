@@ -169,3 +169,19 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Custom additions
+
+/build
+/dist
+/temp
+
+*.bak
+*.bat
+*.cmd
+*.csv
+*.db
+*.DS_Store
+*.log
+*.xlsx
+*.zip

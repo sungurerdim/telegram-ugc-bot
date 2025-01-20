@@ -1,0 +1,12 @@
+{
+    "TG_BOT_NAME": "WILL_BE_USED_FOR_LOG_AND_DB_FILENAMES",
+    "TG_BOT_TOKEN": "TG_TOKEN_OF_BOT",
+    "GROUP_ID": GROUP_ID_THAT_STARTS_WITH_MINUS,
+    "TOPIC_ID": TOPIC_ID_TO_SEND_NOTIFICATIONS,
+    "ENV": "dev",
+    "ADMINS": [
+        "tg_handle_of_admin_1",
+        "tg_handle_of_admin_2",
+        "tg_handle_of_admin_3"
+    ]
+}

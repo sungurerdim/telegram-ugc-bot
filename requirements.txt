@@ -1,0 +1,8 @@
+aiosqlite
+greenlet
+nest_asyncio
+openpyxl
+python-dateutil
+python-telegram-bot[rate-limiter]
+requests
+sqlalchemy
