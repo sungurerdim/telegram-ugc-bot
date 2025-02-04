@@ -1,6 +1,5 @@
 import os
 import re
-import sys
 import logging
 import json
 import asyncio
@@ -48,8 +47,6 @@ DB_FILE = None
 DB_ENGINE = None
 Session = None
 
-user_last_action = {}
-
 INVALID_FILENAME_CHARACTERS = r'[<>:"/\\|?*]+'  # Define invalid filename characters
 
 (
@@ -69,11 +66,15 @@ INVALID_FILENAME_CHARACTERS = r'[<>:"/\\|?*]+'  # Define invalid filename charac
     SUBMIT_CONTENT_GET_INPUT,
     SUBMIT_CONTENT_SAVE_INPUT,
     EXPORT_SUBMISSIONS,
-) = range(16)
+    DELETE_SUBMISSION_SELECT_CAMPAIGN,
+    DELETE_SUBMISSION_SELECT_SUBMISSION,
+    DELETE_SUBMISSION_CONFIRMATION,
+) = range(19)
 
 # Callback data prefixes
 UPDATE_PREFIX = "UPDATE_"
 DELETE_PREFIX = "DELETE_"
+MAIN_MENU_PREFIX = "^menu_main$"
 
 MAIN_MENU_CONFIG = {
     "Create Campaign": "admin_menu_create_campaign",
@@ -82,6 +83,7 @@ MAIN_MENU_CONFIG = {
     "Active Campaigns": "menu_list_active_campaigns",
     "All Campaigns": "menu_list_all_campaigns",
     "My Submissions": "menu_list_my_submissions",
+    "Delete Submission": "menu_delete_submission",
     "All Submissions": "admin_menu_list_all_submissions",
     "Submit Content": "menu_submit_content",
     "Export Submissions": "admin_menu_export_submissions",
@@ -190,6 +192,22 @@ def log_function_call(func):
 
 # ---------- END OF DECORATORS
 
+# Define constants for uniformity
+RETURN_TEXT = "Return to Main Menu"
+RETURN_CALLBACK = "menu_main"
+APPROVE_TEXT = "Approve"
+APPROVE_CALLBACK_DEFAULT = "confirm_yes"
+CANCEL_TEXT = "Cancel"
+CANCEL_CALLBACK_DEFAULT = "confirm_no"
+
+def get_return_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(RETURN_TEXT, callback_data=RETURN_CALLBACK)]])
+
+def get_confirmation_markup(approve_callback: str = APPROVE_CALLBACK_DEFAULT, cancel_callback: str = CANCEL_CALLBACK_DEFAULT) -> InlineKeyboardMarkup:
+    """Return a standardized approval/cancel markup."""
+    return InlineKeyboardMarkup([[InlineKeyboardButton(APPROVE_TEXT, callback_data=approve_callback),
+                                  InlineKeyboardButton(CANCEL_TEXT, callback_data=cancel_callback)]])
+
 @log_function_call
 @asynccontextmanager
 async def get_session():
@@ -295,12 +313,10 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     Display the main menu with filtered buttons.
     """
-    # context.chat_data["chat_id"] = update.effective_chat.id
     username = update.effective_user.username or "Anonymous"
 
-    # Generate menu buttons for the main menu
     filtered_menu = generate_filtered_menu(username)
-    main_menu_buttons = generate_menu_buttons(filtered_menu, is_main_menu=True)  # Flag as main menu
+    main_menu_buttons = generate_menu_buttons(filtered_menu, is_main_menu=True)
     title = "Available Actions"
 
     logging.debug(f"Main Menu Title: {title}")
@@ -311,8 +327,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         is_callback = hasattr(update, "callback_query") and update.callback_query is not None
         if is_callback:
-            await update.callback_query.answer()  # Acknowledge the callback
-
+            await update.callback_query.answer()
         await update_static_messages(
             update,
             context,
@@ -330,9 +345,7 @@ async def list_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     List all admin users.
     """
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
     if not ADMINS:
         await update_static_messages(
             update,
@@ -359,9 +372,7 @@ async def list_my_submissions(update: Update, context: ContextTypes.DEFAULT_TYPE
     username = update.effective_user.username or "Anonymous"
     submissions = await fetch_data(Submission, filters={"username": username})
 
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
 
     if not submissions:
         await update_static_messages(
@@ -402,9 +413,7 @@ async def list_all_submissions(update: Update, context: ContextTypes.DEFAULT_TYP
     List all submissions across campaigns.
     """
     submissions = await fetch_data(Submission)
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
 
     if not submissions:
         await update_static_messages(
@@ -440,9 +449,7 @@ async def list_all_submissions(update: Update, context: ContextTypes.DEFAULT_TYP
 @admin_only
 @log_function_call
 async def reload_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
 
     try:
         load_config()
@@ -471,12 +478,10 @@ def initialize_log():
     elif ENV == "prod":
         log_level = logging.ERROR
     else:
-        log_level = logging.ERROR  # Default fallback for unknown environments
+        log_level = logging.ERROR
     
     print(f"Environment: {ENV}")
     print(f"log_level: {log_level}")
-
-    logging.StreamHandler(sys.stdout)
 
     handlers = [logging.StreamHandler()]
 
@@ -501,7 +506,6 @@ def initialize_log():
     logging.getLogger("httpx").setLevel(logging.ERROR)
     logging.getLogger("sqlalchemy").setLevel(logging.ERROR)
     logging.getLogger("sqlite3").setLevel(logging.ERROR)
-    # logging.getLogger("python-telegram-bot").setLevel(logging.ERROR)
 
 @log_function_call
 async def initialize_db():
@@ -510,12 +514,11 @@ async def initialize_db():
     DB_ENGINE = create_async_engine(
         f"sqlite+aiosqlite:///{DB_FILE}",
         echo=False,
-        connect_args={"timeout": 10},  # Timeout for database locks
+        connect_args={"timeout": 10},
     )
 
     Session = sessionmaker(bind=DB_ENGINE, expire_on_commit=False, class_=AsyncSession)
 
-    # Automatically create tables from ORM models
     async with DB_ENGINE.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -566,14 +569,11 @@ def generate_excel_file(data, headers, filename="export.xlsx"):
     sheet = workbook.active
     sheet.title = "Export"
 
-    # Add headers
     sheet.append([str(header) for header in headers])
 
-    # Add rows
     for row in data:
         sheet.append(row)
 
-    # Save to an in-memory file
     output = BytesIO()
     workbook.save(output)
     output.seek(0)
@@ -588,14 +588,12 @@ def format_datetime(dt: datetime) -> str:
 
 @log_function_call
 def parse_and_validate_date(date_str: str, field_name: str) -> datetime:
-    """Parse and validate a date input, ensuring it is in UTC."""
     logging.info("")
     logging.info("------------------------------")
     logging.info("parse_and_validate_date")
     logging.info(f"Parsing {field_name}: {date_str}")
 
     if isinstance(date_str, datetime):
-        # If already a datetime object, ensure it is in UTC, and reset microseconds
         if date_str.tzinfo is None:
             logging.warning(f"{field_name}: Naive datetime detected. Assuming UTC.")
             parsed_dt = date_str.replace(tzinfo=timezone.utc, microsecond=0)
@@ -605,16 +603,13 @@ def parse_and_validate_date(date_str: str, field_name: str) -> datetime:
         return parsed_dt
 
     try:
-        # Primary format: 'dd.mm.yyyy HH:MM:SS' (assumed UTC for naive input)
         parsed_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M:%S").replace(tzinfo=timezone.utc, microsecond=0)
     except ValueError:
         try:
-            # Fallback 1: Format without seconds 'dd.mm.yyyy HH:MM' (assumed UTC for naive input)
             parsed_date = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
             parsed_dt = parsed_date.replace(second=0, tzinfo=timezone.utc, microsecond=0)
         except ValueError:
             try:
-                # Fallback 2: ISO 8601 format
                 parsed_dt = datetime.fromisoformat(date_str)
                 if parsed_dt.tzinfo is None:
                     logging.warning(f"{field_name}: Naive ISO 8601 datetime detected. Assuming UTC.")
@@ -622,7 +617,6 @@ def parse_and_validate_date(date_str: str, field_name: str) -> datetime:
                 parsed_dt = parsed_dt.astimezone(timezone.utc).replace(microsecond=0)
             except ValueError:
                 try:
-                    # Fallback 3: dateutil's ISO 8601 parser
                     parsed_dt = parser.isoparse(date_str)
                     if parsed_dt.tzinfo is None:
                         logging.warning(f"{field_name}: Naive dateutil datetime detected. Assuming UTC.")
@@ -649,25 +643,16 @@ def generate_menu_buttons(menu_config: dict, is_main_menu: bool = False) -> Inli
     """
     Generate a list of inline keyboard buttons for a given menu configuration, 
     grouping them into rows with a specified number of buttons per row.
-
-    Args:
-        menu_config: A dictionary where keys are button text, and values are callback data.
-        is_main_menu: Whether to include the "Return to Main Menu" button.
-    
-    Returns:
-        InlineKeyboardMarkup: Inline keyboard with grouped buttons.
     """
     
     MAX_BUTTONS_PER_ROW = 2
 
-    # Group buttons into rows based on MAX_BUTTONS_PER_ROW
     buttons = [
         InlineKeyboardButton(name, callback_data=action)
         for name, action in menu_config.items()
     ]
     button_rows = [buttons[i:i + MAX_BUTTONS_PER_ROW] for i in range(0, len(buttons), MAX_BUTTONS_PER_ROW)]
 
-    # Add "Return to Main Menu" button if not the main menu
     if not is_main_menu:
         button_rows.append([InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")])
 
@@ -679,7 +664,6 @@ def get_campaign_status(start_date, end_date, current_time=None, tz=timezone.utc
     if not current_time:
         current_time = datetime.now(tz)
 
-    # Ensure all datetime objects are timezone-aware
     if start_date.tzinfo is None:
         start_date = start_date.replace(tzinfo=tz)
     if end_date.tzinfo is None:
@@ -697,9 +681,8 @@ def get_campaign_status(start_date, end_date, current_time=None, tz=timezone.utc
 async def list_campaigns_as_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     campaigns = await fetch_data(Campaign)
     if not campaigns:
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+        
         await update_static_messages(
             update,
             context,
@@ -708,13 +691,10 @@ async def list_campaigns_as_menu(update: Update, context: ContextTypes.DEFAULT_T
         )
         return MENU_MAIN
 
-    # Prepare button data for campaigns
     campaign_buttons = {campaign.name: f"{UPDATE_PREFIX}{campaign.id}" for campaign in campaigns}
 
-    # Generate menu buttons with a specified number of buttons per row
     reply_markup = generate_menu_buttons(campaign_buttons, is_main_menu=False)
 
-    # Send a single message with the buttons
     await update_static_messages(
         update,
         context,
@@ -728,10 +708,6 @@ async def list_campaigns_as_menu(update: Update, context: ContextTypes.DEFAULT_T
 async def get_submission_counts(campaign_ids):
     """
     Fetch the number of submissions for each campaign ID.
-    Args:
-        campaign_ids (list): List of campaign IDs.
-    Returns:
-        dict: A dictionary mapping campaign IDs to their submission counts.
     """
     if not campaign_ids:
         logging.warning("No campaign IDs provided to fetch submission counts.")
@@ -747,8 +723,6 @@ async def get_submission_counts(campaign_ids):
                 .group_by(Submission.campaign_id)
             )
             results = await session.execute(stmt)
-            
-            # Convert results into a dictionary
             submission_counts = {row[0]: row[1] for row in results}
             logging.info(f"Submission counts fetched: {submission_counts}")
             return submission_counts
@@ -768,11 +742,8 @@ async def list_campaigns_as_message(update: Update, context: ContextTypes.DEFAUL
     campaigns = await fetch_campaigns(campaign_type)
     current_time = datetime.now(timezone.utc)
 
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
 
-    # Prepare content
     if campaigns:
         submission_counts = await get_submission_counts([c["id"] for c in campaigns])
 
@@ -801,14 +772,12 @@ async def list_campaigns_as_message(update: Update, context: ContextTypes.DEFAUL
 @safe_execute
 @log_function_call
 async def create_campaign_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # context.user_data.clear()  # Clear any residual data
-
     await update_static_messages(
         update,
         context,
         title="Enter the campaign name:",
-        content=None,  # No buttons required here
-        send_new=True  # Reuse the existing message if possible
+        content=None,
+        send_new=True
     )
     return CREATE_CAMPAIGN_ASK_FOR_DESCRIPTION
 
@@ -822,7 +791,7 @@ async def create_campaign_get_description(update: Update, context: ContextTypes.
         update,
         context,
         title="Enter the campaign description:",
-        content=None,  # No buttons required here
+        content=None,
         send_new=True
     )
     return CREATE_CAMPAIGN_ASK_FOR_PERIOD
@@ -899,9 +868,7 @@ async def create_campaign_save_to_db(update: Update, context: ContextTypes.DEFAU
         start_date_str = format_datetime(start_date)
         end_date_str = format_datetime(end_date)
 
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
 
         await update_static_messages(
             update,
@@ -936,9 +903,8 @@ async def select_campaign_to_delete(update: Update, context: ContextTypes.DEFAUL
     campaigns = await fetch_data(Campaign)
 
     if not campaigns:
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -947,7 +913,6 @@ async def select_campaign_to_delete(update: Update, context: ContextTypes.DEFAUL
         )
         return MENU_MAIN
 
-    # Prepare buttons for campaigns
     campaign_buttons = {campaign.name: f"{DELETE_PREFIX}{campaign.id}" for campaign in campaigns}
     reply_markup = generate_menu_buttons(campaign_buttons)
 
@@ -969,16 +934,10 @@ async def delete_campaign_confirmation(update: Update, context: ContextTypes.DEF
     campaign = await get_campaign_data_by_id(campaign_id)
     campaign_name = campaign.name if campaign else "Unknown"
 
-    # Store campaign details in user data
     context.user_data["campaign_id"] = campaign_id
     context.user_data["campaign_name"] = campaign_name
-
-    # Prepare confirmation buttons
-    confirmation_buttons = {
-        "Approve": "confirm_yes",
-        "Cancel": "confirm_no"
-    }
-    reply_markup = generate_menu_buttons(confirmation_buttons)
+    
+    reply_markup = get_confirmation_markup()
 
     context.user_data["static_message_id"] = None
 
@@ -1046,13 +1005,11 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
     new_value = update.effective_message.text.strip()
 
     try:
-        # Fetch the current campaign data
         campaign = await fetch_data(Campaign, filters={"id": campaign_id})
         if not campaign:
             raise ValueError("Campaign not found.")
         campaign = campaign[0]
 
-        # Parse and validate current and new values
         current_value = getattr(campaign, field, None)
         if field in ["start_date", "end_date"]:
             current_value = parse_and_validate_date(current_value, field) if current_value else None
@@ -1061,7 +1018,6 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
             formatted_current_value = format_datetime(current_value) if current_value else "N/A"
             formatted_new_value = format_datetime(new_value)
 
-            # Additional checks for date validity
             if field == "end_date":
                 current_start_date = parse_and_validate_date(campaign.start_date, "start_date") if campaign.start_date else None
                 if new_value <= current_start_date:
@@ -1069,7 +1025,7 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
                         update,
                         context,
                         title="End date cannot be earlier than the start date.",
-                        content=InlineKeyboardMarkup([[InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]]),
+                        content=get_return_markup(),
                         send_new=True,
                     )
                     return MENU_MAIN
@@ -1078,14 +1034,9 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
             formatted_current_value = current_value
             formatted_new_value = new_value
         
-        # Store new value in user_data
         context.user_data["new_value"] = new_value
 
-        # Prepare confirmation buttons
-        reply_markup = generate_menu_buttons({
-            "Approve": "confirm_yes",
-            "Cancel": "confirm_no"
-        })
+        reply_markup = get_confirmation_markup()
 
         await update_static_messages(
             update,
@@ -1095,7 +1046,7 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
                 f"to '{formatted_new_value}'. Do you confirm?"
             ),
             content=reply_markup,
-            send_new=True  # Always a new message
+            send_new=True
         )
         return UPDATE_CAMPAIGN_SAVE_NEW_VALUE
 
@@ -1105,7 +1056,7 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
             update,
             context,
             title="Failed to validate the input. Please try again.",
-            content=InlineKeyboardMarkup([[InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]]),
+            content=get_return_markup(),
             send_new=True,
         )
         return UPDATE_CAMPAIGN_GET_NEW_VALUE
@@ -1117,7 +1068,6 @@ async def update_campaign_save_new_value(update: Update, context: ContextTypes.D
         field = context.user_data["update_field"]
         new_value = context.user_data["new_value"]
 
-        # Update the campaign field in the database
         await update_campaign_field(campaign_id, field, new_value)
 
         message_text = f"Campaign {field.replace('_', ' ')} updated successfully."
@@ -1135,8 +1085,8 @@ async def update_campaign_save_new_value(update: Update, context: ContextTypes.D
             update,
             context,
             title=message_text,
-            content=InlineKeyboardMarkup([[InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]]),
-            send_new=False,  # Update the existing message
+            content=get_return_markup(),
+            send_new=False,
         )
     else:
         await update_static_messages(
@@ -1151,9 +1101,8 @@ async def update_campaign_save_new_value(update: Update, context: ContextTypes.D
 @log_function_call
 async def delete_campaign_from_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.data != "confirm_yes":
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1176,9 +1125,8 @@ async def delete_campaign_from_db(update: Update, context: ContextTypes.DEFAULT_
                 caption=f"Submissions exported for campaign '{campaign_name}'."
             )
 
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1189,9 +1137,8 @@ async def delete_campaign_from_db(update: Update, context: ContextTypes.DEFAULT_
     
     except Exception as e:
         logging.error(f"Error deleting campaign: {e}")
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1203,11 +1150,8 @@ async def delete_campaign_from_db(update: Update, context: ContextTypes.DEFAULT_
 @safe_execute
 @log_function_call
 async def submit_content_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    return_button = InlineKeyboardMarkup([
-        [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-    ])
+    return_button = get_return_markup()
 
-    # context.chat_data["chat_id"] = update.effective_chat.id  # Ensure chat_id is initialized
     active_campaigns = await fetch_campaigns("active")
 
     if not active_campaigns:
@@ -1263,10 +1207,8 @@ async def submit_content_save_input(update: Update, context: ContextTypes.DEFAUL
     }
 
     try:
-        # Insert submission into the database
         await insert_data(Submission, data)
 
-        # Notify group or topic if configured
         if GROUP_ID and TOPIC_ID:
             message = (
                 f"New Submission from @{username} 🎉\n\n"
@@ -1277,17 +1219,14 @@ async def submit_content_save_input(update: Update, context: ContextTypes.DEFAUL
                 chat_id=GROUP_ID,
                 text=message,
                 message_thread_id=TOPIC_ID,
-                # parse_mode="MarkdownV2"
                 parse_mode=None
             )
             logging.info(f"Submission published to group {GROUP_ID} in topic {TOPIC_ID}.")
         else:
             logging.warning("Group ID or Topic ID not configured. Skipping group notification.")
 
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
-        # Notify user of successful submission
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1300,9 +1239,8 @@ async def submit_content_save_input(update: Update, context: ContextTypes.DEFAUL
     except ValueError as e:
         error_message = "You have already submitted this content for the selected campaign." if "already been submitted" in str(e) else str(e)
         logging.error(f"Submission error: {e}")
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1311,9 +1249,8 @@ async def submit_content_save_input(update: Update, context: ContextTypes.DEFAUL
         )
     except Exception as e:
         logging.error(f"Unexpected error while saving submission: {e}")
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1352,13 +1289,11 @@ async def export_submissions(campaign_id=None):
 @safe_execute
 @log_function_call
 async def export_submissions_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # context.chat_data["chat_id"] = update.effective_chat.id  # Ensure chat_id is initialized
     campaigns = await fetch_data(Campaign)
 
     if not campaigns:
-        return_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("Return to Main Menu", callback_data="menu_main")]
-        ])
+        return_button = get_return_markup()
+
         await update_static_messages(
             update,
             context,
@@ -1367,7 +1302,6 @@ async def export_submissions_start(update: Update, context: ContextTypes.DEFAULT
         )
         return MENU_MAIN
 
-    # Prepare buttons for each campaign and an 'All' option
     campaign_buttons = {"All": "export_all"}
     campaign_buttons.update({campaign.name: f"export_{campaign.id}" for campaign in campaigns})
     reply_markup = generate_menu_buttons(campaign_buttons)
@@ -1394,25 +1328,23 @@ async def export_campaign_submissions(update: Update, context: ContextTypes.DEFA
                 update,
                 context,
                 title="No submissions found for export.",
-                content=None,  # No buttons needed in this case
-                send_new=False  # Use the existing message
+                content=None,
+                send_new=False
             )
             return MENU_MAIN
         
         excel_file, filename = export_result
         campaigns = {c.id: c.name for c in await fetch_data(Campaign)}
 
-        # Update the existing message to notify about successful export
         await update_static_messages(
             update,
             context,
-            title=f"Submissions exported successfully for {'all campaigns' if is_all else campaigns.get(campaign_id, 'Unknown')}.\n\n"
+            title=f"Submissions exported successfully for {'all campaigns' if is_all else campaigns.get(int(campaign_id), 'Unknown')}.\n\n"
                   f"The exported file will be sent as a document shortly.",
-            content=None,  # Keep it simple, no buttons needed for now
+            content=None,
             send_new=False
         )
 
-        # Send the file as a new message
         await context.bot.send_document(
             chat_id=update.effective_chat.id,
             document=excel_file,
@@ -1432,6 +1364,144 @@ async def export_campaign_submissions(update: Update, context: ContextTypes.DEFA
     return MENU_MAIN
 
 @log_function_call
+async def delete_submission_select_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    username = update.effective_user.username or "Anonymous"
+    submissions = await fetch_data(Submission, filters={"username": username})
+    if not submissions:
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="You have no submissions to delete.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    campaign_ids = {submission.campaign_id for submission in submissions}
+    all_campaigns = await fetch_data(Campaign)
+    campaigns_filtered = [c for c in all_campaigns if c.id in campaign_ids]
+    if not campaigns_filtered:
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="No campaigns found for your submissions.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    campaign_buttons = {campaign.name: f"delete_submission_campaign_{campaign.id}" for campaign in campaigns_filtered}
+    reply_markup = generate_menu_buttons(campaign_buttons)
+    await update_static_messages(
+        update,
+        context,
+        title="Select a campaign to delete a submission from:",
+        content=reply_markup,
+    )
+    return DELETE_SUBMISSION_SELECT_CAMPAIGN
+
+@log_function_call
+async def delete_submission_select_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+    prefix = "delete_submission_campaign_"
+    campaign_id = int(data[len(prefix):])
+    context.user_data["delete_submission_campaign_id"] = campaign_id
+    username = update.effective_user.username or "Anonymous"
+    submissions = await fetch_data(Submission, filters={"username": username, "campaign_id": campaign_id})
+    if not submissions:
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="No submissions found for deletion in this campaign.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    submission_buttons = {submission.content: f"delete_submission_sub_{submission.id}" for submission in submissions}
+    reply_markup = generate_menu_buttons(submission_buttons)
+    campaign = await get_campaign_data_by_id(campaign_id)
+    campaign_name = campaign.name if campaign else "Unknown"
+    await update_static_messages(
+        update,
+        context,
+        title=f"Select a submission from campaign '{campaign_name}' to delete:",
+        content=reply_markup,
+    )
+    return DELETE_SUBMISSION_SELECT_SUBMISSION
+
+@log_function_call
+async def delete_submission_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = update.callback_query.data
+    prefix = "delete_submission_sub_"
+    submission_id = int(data[len(prefix):])
+    context.user_data["delete_submission_id"] = submission_id
+    submissions = await fetch_data(Submission, filters={"id": submission_id})
+    if not submissions:
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="Submission not found.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    submission = submissions[0]
+    username = update.effective_user.username or "Anonymous"
+    if submission.username != username:
+        await update_static_messages(
+            update,
+            context,
+            title="You are not authorized to delete this submission.",
+            content=get_return_markup(),
+        )
+        return MENU_MAIN
+    
+    reply_markup = get_confirmation_markup("confirm_delete_submission_yes", "confirm_delete_submission_no")
+
+    await update_static_messages(
+        update,
+        context,
+        title=f"Are you sure you want to delete the submission:\n\n'{submission.content}'?",
+        content=reply_markup,
+    )
+    return DELETE_SUBMISSION_CONFIRMATION
+
+@log_function_call
+async def delete_submission_from_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.callback_query.data != "confirm_delete_submission_yes":
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="Deletion cancelled.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    submission_id = context.user_data.get("delete_submission_id")
+    if not submission_id:
+        return_button = get_return_markup()
+
+        await update_static_messages(
+            update,
+            context,
+            title="Submission not found.",
+            content=return_button,
+        )
+        return MENU_MAIN
+    await delete_data(Submission, filters={"id": submission_id})
+    return_button = get_return_markup()
+    await update_static_messages(
+        update,
+        context,
+        title="Submission deleted successfully.",
+        content=return_button,
+    )
+    return MENU_MAIN
+
+@log_function_call
 async def vacuum_db():
     async with DB_ENGINE.begin() as conn:
         await conn.execute("VACUUM;")
@@ -1440,7 +1510,7 @@ async def vacuum_db():
 @log_function_call
 async def start_maintenance_tasks():
     while True:
-        await asyncio.sleep(86400)  # Run every 24 hours
+        await asyncio.sleep(86400)
         await vacuum_db()
 
 @log_function_call
@@ -1453,13 +1523,13 @@ async def message_worker():
     while True:
         context, chat_id, text, kwargs = await message_queue.get()
         try:
-            for attempt in range(3):  # Retry up to 3 times
+            for attempt in range(3):
                 try:
                     await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
                     break
                 except Exception as e:
                     logging.error(f"Failed to send message on attempt {attempt + 1}: {e}")
-                    if attempt == 2:  # On the final attempt, log failure
+                    if attempt == 2:
                         logging.error(f"Message permanently failed: {text}")
                     await asyncio.sleep(0.25)
         except Exception as e:
@@ -1475,15 +1545,12 @@ async def enqueue_message(context, chat_id, text, **kwargs):
 async def set_menu_button(app: Application):
     bot = app.bot
 
-    # Define the /menu command
     menu_commands = [
         BotCommand("menu", "Show Main Menu"),
     ]
 
-    # Set the command for the bot
     await bot.set_my_commands(menu_commands)
 
-    # Set the menu button to display the /menu command
     await bot.set_chat_menu_button(
         menu_button=MenuButtonCommands()
     )
@@ -1503,30 +1570,18 @@ async def update_static_messages(
     context: ContextTypes.DEFAULT_TYPE,
     title: str,
     content: InlineKeyboardMarkup = None,
-    send_new: bool = False,  # Explicitly force new messages if needed
-    max_length: int = 4096  # Telegram's character limit for messages
+    send_new: bool = False,
+    max_length: int = 4096
 ):
-    """
-    Update or send a message, keeping campaign info together.
-
-    Args:
-        update: The Update object from Telegram.
-        context: The context from Telegram's CallbackContext.
-        title: The message text (can be long).
-        content: InlineKeyboardMarkup for the last message.
-        send_new: Whether to send a new message instead of updating an existing one.
-        max_length: The maximum length of a single message.
-    """
     chat_id = update.effective_chat.id
     previous_message_id = context.user_data.get("static_message_id")
 
-    # Split campaign text into grouped chunks
-    campaigns = title.split("\n\n")  # Assuming campaigns are separated by "\n\n"
+    campaigns = title.split("\n\n")
     messages = []
     current_message = ""
 
     for campaign in campaigns:
-        if len(current_message) + len(campaign) + 2 <= max_length:  # +2 for "\n\n"
+        if len(current_message) + len(campaign) + 2 <= max_length:
             current_message += f"\n\n{campaign}" if current_message else campaign
         else:
             messages.append(current_message)
@@ -1535,11 +1590,9 @@ async def update_static_messages(
     if current_message:
         messages.append(current_message)
 
-    # Check if the current batch results in multiple messages
     is_multi_message = len(messages) > 1
 
     if send_new or is_multi_message or not previous_message_id:
-        # Send new messages if forced, multi-message, or no previous message
         for i, msg in enumerate(messages):
             is_last_message = (i == len(messages) - 1)
             reply_markup = content if is_last_message else None
@@ -1548,26 +1601,23 @@ async def update_static_messages(
                 chat_id=chat_id,
                 text=msg,
                 reply_markup=reply_markup,
-                parse_mode=None,  # Remove Markdown
+                parse_mode=None,
                 disable_web_page_preview=True,
             )
 
-            # Store only the first message ID
             if i == 0:
                 context.user_data["static_message_id"] = sent_message.message_id
 
-        # Clear static_message_id if multiple messages were sent
         if is_multi_message:
             context.user_data["static_message_id"] = None
     else:
-        # Edit existing single message
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=previous_message_id,
                 text=messages[0],
                 reply_markup=content,
-                parse_mode=None,  # Remove Markdown
+                parse_mode=None,
                 disable_web_page_preview=True,
             )
         except Exception as e:
@@ -1604,55 +1654,68 @@ async def main(TOKEN):
                 CallbackQueryHandler(export_submissions_start, pattern="^admin_menu_export_submissions$"),
                 CallbackQueryHandler(reload_config, pattern="^admin_menu_reload_config$"),
                 CallbackQueryHandler(list_admin_users, pattern="^menu_list_admins$"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),  # Handle "Return to Main Menu"
+                CallbackQueryHandler(delete_submission_select_campaign, pattern="^menu_delete_submission$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             CREATE_CAMPAIGN_ASK_FOR_DESCRIPTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_campaign_get_description),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             CREATE_CAMPAIGN_ASK_FOR_PERIOD: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_campaign_get_period),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             CREATE_CAMPAIGN_SAVE_TO_DB: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, create_campaign_save_to_db),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             UPDATE_CAMPAIGN_LIST_FIELDS: [
                 CallbackQueryHandler(update_campaign_list_fields, pattern=f"^{UPDATE_PREFIX}.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             UPDATE_CAMPAIGN_GET_NEW_VALUE: [
                 CallbackQueryHandler(update_campaign_get_new_value, pattern="^(name|description|start_date|end_date)$"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             UPDATE_CAMPAIGN_ASK_FOR_CONFIRMATION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, update_campaign_confirmation),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],            
             UPDATE_CAMPAIGN_SAVE_NEW_VALUE: [
                 CallbackQueryHandler(update_campaign_save_new_value, pattern="^confirm_.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             DELETE_CAMPAIGN_ASK_FOR_CONFIRMATION: [
                 CallbackQueryHandler(delete_campaign_confirmation, pattern=f"^{DELETE_PREFIX}.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             DELETE_CAMPAIGN_FROM_DB: [
                 CallbackQueryHandler(delete_campaign_from_db, pattern="^confirm_.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             SUBMIT_CONTENT_GET_INPUT: [
                 CallbackQueryHandler(submit_content_get_input, pattern="^submit_.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             SUBMIT_CONTENT_SAVE_INPUT: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, submit_content_save_input),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
             EXPORT_SUBMISSIONS: [
                 CallbackQueryHandler(export_campaign_submissions, pattern="^export_.*"),
-                CallbackQueryHandler(main_menu, pattern="^menu_main$"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
+            ],
+            DELETE_SUBMISSION_SELECT_CAMPAIGN: [
+                CallbackQueryHandler(delete_submission_select_submission, pattern="^delete_submission_campaign_.*"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
+            ],
+            DELETE_SUBMISSION_SELECT_SUBMISSION: [
+                CallbackQueryHandler(delete_submission_confirmation, pattern="^delete_submission_sub_.*"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
+            ],
+            DELETE_SUBMISSION_CONFIRMATION: [
+                CallbackQueryHandler(delete_submission_from_db, pattern="^confirm_delete_submission_.*"),
+                CallbackQueryHandler(main_menu, pattern=MAIN_MENU_PREFIX),
             ],
         },
         fallbacks=[
@@ -1663,14 +1726,13 @@ async def main(TOKEN):
         ],
         allow_reentry=True,
         per_message=False,
-        # conversation_timeout=60,
     )
 
     APP.add_handler(conv_handler)
     APP.bot.request.timeout = 30
 
     asyncio.create_task(start_maintenance_tasks())
-    asyncio.create_task(start_workers(5))  # Schedule workers to run concurrently
+    asyncio.create_task(start_workers(5))
 
     try:
         await APP.run_polling()
