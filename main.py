@@ -221,14 +221,12 @@ async def insert_data(model, data):
     async with get_session() as session:
         try:
             session.add(model(**data))
-            await session.commit()
+            # Commit is handled automatically by the session.begin() context.
         except IntegrityError as e:
             logging.error(f"Duplicate entry detected: {e}")
-            await session.rollback()
             raise ValueError("This content has already been submitted for the selected campaign.")
         except Exception as e:
             logging.error(f"Error inserting data: {e}")
-            await session.rollback()
             raise
 
 @log_function_call
@@ -238,10 +236,10 @@ async def update_data(model, filters, updates):
         try:
             stmt = update(model).where(*(getattr(model, k) == v for k, v in filters.items())).values(**updates)
             await session.execute(stmt)
-            await session.commit()
+            # Commit is handled automatically.
         except Exception as e:
             logging.error(f"Error updating data: {e}")
-            await session.rollback()
+            raise
 
 @log_function_call
 async def fetch_data(model, filters=None):
@@ -263,10 +261,10 @@ async def delete_data(model, filters):
         try:
             stmt = delete(model).where(*(getattr(model, k) == v for k, v in filters.items()))
             await session.execute(stmt)
-            await session.commit()
+            # Commit is handled automatically.
         except Exception as e:
             logging.error(f"Error deleting data: {e}")
-            await session.rollback()
+            raise
 
 @log_function_call
 def validate_table_name(table_name):
@@ -340,6 +338,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return MENU_MAIN
 
+@safe_execute
 @log_function_call
 async def list_admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -447,6 +446,7 @@ async def list_all_submissions(update: Update, context: ContextTypes.DEFAULT_TYP
     return MENU_MAIN
 
 @admin_only
+@safe_execute
 @log_function_call
 async def reload_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return_button = get_return_markup()
@@ -588,46 +588,45 @@ def format_datetime(dt: datetime) -> str:
 
 @log_function_call
 def parse_and_validate_date(date_str: str, field_name: str) -> datetime:
+    """Parse a date string into a UTC datetime object using multiple formats."""
+
     logging.info("")
     logging.info("------------------------------")
     logging.info("parse_and_validate_date")
     logging.info(f"Parsing {field_name}: {date_str}")
-
+    
     if isinstance(date_str, datetime):
         if date_str.tzinfo is None:
             logging.warning(f"{field_name}: Naive datetime detected. Assuming UTC.")
-            parsed_dt = date_str.replace(tzinfo=timezone.utc, microsecond=0)
-        else:
-            parsed_dt = date_str.astimezone(timezone.utc).replace(microsecond=0)
-        logging.info(f"{field_name}: {date_str} is already a datetime object -> {parsed_dt}")
-        return parsed_dt
+            return date_str.replace(tzinfo=timezone.utc, microsecond=0)
+        return date_str.astimezone(timezone.utc).replace(microsecond=0)
+
+    date_formats = ["%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M"]
+    for fmt in date_formats:
+        try:
+            dt = datetime.strptime(date_str, fmt).replace(tzinfo=timezone.utc, microsecond=0)
+            return dt
+        except ValueError:
+            continue
 
     try:
-        parsed_dt = datetime.strptime(date_str, "%d.%m.%Y %H:%M:%S").replace(tzinfo=timezone.utc, microsecond=0)
+        dt = datetime.fromisoformat(date_str)
+        if dt.tzinfo is None:
+            logging.warning(f"{field_name}: Naive ISO 8601 datetime detected. Assuming UTC.")
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(microsecond=0)
     except ValueError:
-        try:
-            parsed_date = datetime.strptime(date_str, "%d.%m.%Y %H:%M")
-            parsed_dt = parsed_date.replace(second=0, tzinfo=timezone.utc, microsecond=0)
-        except ValueError:
-            try:
-                parsed_dt = datetime.fromisoformat(date_str)
-                if parsed_dt.tzinfo is None:
-                    logging.warning(f"{field_name}: Naive ISO 8601 datetime detected. Assuming UTC.")
-                    parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
-                parsed_dt = parsed_dt.astimezone(timezone.utc).replace(microsecond=0)
-            except ValueError:
-                try:
-                    parsed_dt = parser.isoparse(date_str)
-                    if parsed_dt.tzinfo is None:
-                        logging.warning(f"{field_name}: Naive dateutil datetime detected. Assuming UTC.")
-                        parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
-                    parsed_dt = parsed_dt.astimezone(timezone.utc).replace(microsecond=0)
-                except ValueError as e:
-                    logging.error(f"Failed to parse {field_name} '{date_str}': {e}")
-                    raise ValueError(f"Invalid {field_name}. Please use the format 'dd.mm.yyyy HH:MM:SS' or ISO 8601.")
+        pass
 
-    logging.info(f"field: {field_name} - input: {date_str} -> output: {parsed_dt}")
-    return parsed_dt
+    try:
+        dt = parser.isoparse(date_str)
+        if dt.tzinfo is None:
+            logging.warning(f"{field_name}: Naive dateutil datetime detected. Assuming UTC.")
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).replace(microsecond=0)
+    except ValueError as e:
+        logging.error(f"Failed to parse {field_name} '{date_str}': {e}")
+        raise ValueError(f"Invalid {field_name}. Please use the format 'dd.mm.yyyy HH:MM:SS' or ISO 8601.")
 
 @log_function_call
 def generate_filtered_menu(username: str) -> dict:
@@ -925,6 +924,7 @@ async def select_campaign_to_delete(update: Update, context: ContextTypes.DEFAUL
 
     return DELETE_CAMPAIGN_ASK_FOR_CONFIRMATION
 
+@safe_execute
 @log_function_call
 async def delete_campaign_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -960,6 +960,7 @@ async def get_campaign_data_by_id(campaign_id):
         logging.error(f"Error fetching campaign by ID {campaign_id}: {e}")
         return None
 
+@safe_execute
 @log_function_call
 async def update_campaign_list_fields(update: Update, context: ContextTypes.DEFAULT_TYPE):
     campaign_id = int(update.callback_query.data[len(UPDATE_PREFIX):])
@@ -985,6 +986,7 @@ async def update_campaign_list_fields(update: Update, context: ContextTypes.DEFA
     )
     return UPDATE_CAMPAIGN_GET_NEW_VALUE
 
+@safe_execute
 @log_function_call
 async def update_campaign_get_new_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field = update.callback_query.data
@@ -998,6 +1000,7 @@ async def update_campaign_get_new_value(update: Update, context: ContextTypes.DE
     )
     return UPDATE_CAMPAIGN_ASK_FOR_CONFIRMATION
 
+@safe_execute
 @log_function_call
 async def update_campaign_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     campaign_id = context.user_data["campaign_id"]
@@ -1061,6 +1064,7 @@ async def update_campaign_confirmation(update: Update, context: ContextTypes.DEF
         )
         return UPDATE_CAMPAIGN_GET_NEW_VALUE
 
+@safe_execute
 @log_function_call
 async def update_campaign_save_new_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.data == "confirm_yes":
@@ -1098,6 +1102,7 @@ async def update_campaign_save_new_value(update: Update, context: ContextTypes.D
 
     return MENU_MAIN
 
+@safe_execute
 @log_function_call
 async def delete_campaign_from_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.data != "confirm_yes":
@@ -1175,6 +1180,7 @@ async def submit_content_start(update: Update, context: ContextTypes.DEFAULT_TYP
     
     return SUBMIT_CONTENT_GET_INPUT
 
+@safe_execute
 @log_function_call
 async def submit_content_get_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     campaign_id = int(update.callback_query.data.split("_")[1])
@@ -1192,6 +1198,7 @@ async def submit_content_get_input(update: Update, context: ContextTypes.DEFAULT
     )
     return SUBMIT_CONTENT_SAVE_INPUT
 
+@safe_execute
 @log_function_call
 async def submit_content_save_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     content = update.effective_message.text.strip()
@@ -1363,6 +1370,7 @@ async def export_campaign_submissions(update: Update, context: ContextTypes.DEFA
 
     return MENU_MAIN
 
+@safe_execute
 @log_function_call
 async def delete_submission_select_campaign(update: Update, context: ContextTypes.DEFAULT_TYPE):
     username = update.effective_user.username or "Anonymous"
@@ -1400,6 +1408,7 @@ async def delete_submission_select_campaign(update: Update, context: ContextType
     )
     return DELETE_SUBMISSION_SELECT_CAMPAIGN
 
+@safe_execute
 @log_function_call
 async def delete_submission_select_submission(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -1430,6 +1439,7 @@ async def delete_submission_select_submission(update: Update, context: ContextTy
     )
     return DELETE_SUBMISSION_SELECT_SUBMISSION
 
+@safe_execute
 @log_function_call
 async def delete_submission_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
@@ -1468,6 +1478,7 @@ async def delete_submission_confirmation(update: Update, context: ContextTypes.D
     )
     return DELETE_SUBMISSION_CONFIRMATION
 
+@safe_execute
 @log_function_call
 async def delete_submission_from_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query.data != "confirm_delete_submission_yes":
@@ -1623,6 +1634,7 @@ async def update_static_messages(
         except Exception as e:
             logging.error(f"Error editing static message: {e}")
 
+@safe_execute
 @log_function_call
 async def main(TOKEN):
     initialize_log()
